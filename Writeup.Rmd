@@ -1,0 +1,221 @@
+---
+title: "Prediction Model on personal data activity"
+author: "Max. M"
+date: "22 Dec 2015"
+output: html_document
+---
+
+```{r setup, include=FALSE, cache= TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+##Summary
+
+In this project, we will explore personal data activity from devices such as Jawbone Up, Nike FuelBand, and Fitbit. More specificaly data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal  is to predict the manner in which they did the exercise. This is the "classe" variable in the training set.
+
+More information is available from the website here:[goupware](http://groupware.les.inf.puc-rio.br/har) 
+
+
+Download and load the data:
+```{r, cache= TRUE}
+trainUrl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+testUrl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+download.file(trainUrl, 'train.csv', method = 'curl')
+download.file(testUrl, 'test.csv', method = 'curl')
+trainingData <- read.csv('train.csv', na.strings = c('NA','#DIV/0!', '' ))
+testingData <- read.csv('test.csv', na.strings = c('NA','#DIV/0!', '' ))
+
+```
+
+##Exploring the data
+```{r,echo= TRUE, results= 'hide' }
+str(trainingData)
+str(testingData)
+```
+The training and testing dataset have 160 variables. The training dataset is pretty large with 19622 observations while the testing dataset is small with only 20 observations.There are a lot of columns with a majority of NAs. So l'ets get rid of variables with more than 80% of NAs.
+
+```{r}
+# identify columns with more than 80% of NAs
+complete <- colSums(is.na(trainingData))> .8*nrow(trainingData)
+
+# remove columns with more than 80% of NAs
+trainingData <- trainingData[, !complete]
+testingData <- testingData[, !complete]
+# check number of NAs by column
+sum(is.na(trainingData))
+```
+We are left with variables without NAs,So this reduced our datasets to 60 variables, but we still have some variables we dont need for our prediction like the different timestamps, usernames, etc. So we will take away the firts 7 columns of our datasets:
+
+```{r}
+trainingData <- trainingData[, -(1:7)]
+testingData <- testingData[, -(1:7)]
+dim(trainingData)
+dim(testingData)
+```
+
+Here we can see that we are left with 53 variables we can work with to make predictions on the `classe` variable.
+
+##Cross validation parameters
+
+We partition our training set into 30% testing and 70% training using the original testing data as validation.
+
+```{r}
+library(caret)
+library(lattice)
+library(ggplot2)
+set.seed(1234)
+intrain <- createDataPartition(trainingData$classe, p = .7, list = F)
+training <- trainingData[intrain,]
+testing <- trainingData[-intrain,]
+dim(training)
+dim(testing)
+```
+
+Here we have created a training set with 13737 observations and a training set with 5885 observation. Lets check the variatioins of the variables and see if there are some we can drop for poor prediction value.
+
+testing for near zero variation:
+```{r}
+library(caret)
+nsv <- nearZeroVar(trainingData, saveMetrics = T)
+nsv
+```
+
+From this table we see that we dont have any near  zero variation variables we could drop.
+
+##Exploring types of prediction
+
+Use multicore for speed optimization (this workes on mac only, so skip or use libraries for your system).
+```{r}
+# Multicore parallel
+library(foreach)
+library(iterators)
+library(parallel)
+library(doMC)
+registerDoMC(cores=detectCores())
+```
+
+
+As our outcome is categorical (factor of A, B, C, D, E) it is not appropriate for linear models as it c'ant meet the GLM normality assumption. We will start predicting  with trees.
+
+###predicting with trees
+
+Predicting with trees:
+```{r, cache= TRUE}
+set.seed(1234)
+modFit <- train(classe ~ ., data = training, method = 'rpart')
+modFit$finalModel
+modFit
+
+pred1 <- predict(modFit, newdata = testing)
+confusionMatrix(pred1, data = testing$classe)
+```
+
+Prediction tree without preprocessing gives poor results. We got an accuracy of 49.85%. lets try to add preprocessing, more specifically centering and scaling the data:
+```{r, cache= TRUE}
+set.seed(1234)
+modFit <- train(classe ~ ., data = training, method = 'rpart', 
+                preProcess= c('center', 'scale'))
+modFit$finalModel
+modFit
+
+pred1 <- predict(modFit, newdata = testing)
+confusionMatrix(pred1, data = testing$classe)
+```
+Preprocessing gives the same result as without preprocessing. Lets try the random forest.
+
+####Random Forest
+Using the random forest method with default settings takes to much time! We have to somel to speed it up.
+
+random forest  with K-fold cross validation :
+```{r, cache=TRUE}
+tc_cv <- trainControl(method = 'cv', number = 4)
+set.seed(1234)
+start.time <- Sys.time()
+rf_kfold <- train(classe ~ ., data = training, method = 'rf', 
+                trControl = tc_cv)
+end.time <- Sys.time()
+time.taken <- end.time-start.time
+time.taken
+``` 
+
+```{r}
+pred_rf_kfold <- predict(rf_kfold, newdata = testing)
+confusionMatrix(pred_rf_kfold, data = testing$classe)
+```
+
+Random forest K-fold cross validation gives good results with **99.41%** accuracy.
+
+random forest with Bootstrap :
+```{r, cache=TRUE}
+tc_boot <- trainControl(method="boot", number=4)
+set.seed(1234)
+start.time <- Sys.time()
+rf_boot <- train(classe ~ ., data = training, method = 'rf', 
+                trControl = tc_boot)
+end.time <- Sys.time()
+time.taken <- end.time-start.time
+time.taken
+``` 
+
+```{r}
+rf_boot$finalModel
+rf_boot
+
+pred_rf_boot <- predict(rf_boot, newdata = testing)
+confusionMatrix(pred_rf_boot, data = testing$classe)
+```
+Random forest with Bootstrap has an accuracy of **99.46%**, slightly better than k-fold cross validation.
+
+Random forest with repeated K-fold cross validation :
+```{r, cache=TRUE}
+tc_rkf <- trainControl(method="repeatedcv", number=4, repeats = 2)
+set.seed(1234)
+start.time <- Sys.time()
+rf_rkf <- train(classe ~ ., data = training, method = 'rf', 
+                trControl = tc_rkf)
+end.time <- Sys.time()
+time.taken <- end.time-start.time
+time.taken
+``` 
+
+```{r}
+rf_rkf$finalModel
+rf_rkf
+
+pred_rf_rkf <- predict(rf_rkf, newdata = testing)
+confusionMatrix(pred_rf_rkf, data = testing$classe)
+```
+Random forest with repeated K-fold cross validation has an accuracy of **99.39%**. 
+
+Of the 3 random forest methods bootstrap and k-fold cross validation yielded the best results, **99.41%** and **99.46%**. 
+
+##out of sample error estimate
+We will use the random forest with bootstrap and k-fold cross validation prediction on the validation dataset. The out of sample error for the K-fold method will not be lower than 1- 0.9941 = **0.0059%**, while the bootstrap method should not be lower than 1-0.9946 = **0.0054%**
+
+## Submission data
+
+```{r}
+# predict on validation dataset
+validation_rf_kfold <- predict(rf_kfold, newdata = testingData)
+validation_rf_kfold
+validation_rf_boot <- predict(rf_boot, newdata = testingData)
+validation_rf_boot
+
+```
+
+Predictions with K-fold: B A B A A E D B A A B C B A E E A B B B
+Predictions with bootstrap: B A B A A E D B A A B C B A E E A B B B
+These predictions are equal.
+
+Submission function:
+```{r, eval=FALSE}
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+answers <- validation_rf_kfold
+pml_write_files(answers)
+```
+
